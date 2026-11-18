@@ -10,8 +10,10 @@
 Khóa chuẩn = `canon(Mã NB)`: viết hoa, bỏ khoảng trắng, bỏ `P-` đầu, bỏ `V|C` sau chữ số cuối. Đẩy tồn = **thay thế toàn bộ** sheet `Ton_Buon`.
 
 ## 2. Đồng bộ từ web gốc
-Nút "Đồng bộ sản phẩm mới" gọi Nhanh.vn (`/api/product/search`, `/api/product/category`, Business 200642) → upsert `San_Pham` theo khóa chuẩn: mã, tên, ảnh, giá niêm yết, Nhãn hàng (`brandName`), Danh mục (nhóm cha cao nhất), Dòng hàng (nhóm con; nếu thiếu suy từ tên). Mỗi lượt 5 trang, admin lặp đến hết.
-⚠ Cần kiểm tra tên trường thực tế của response Nhanh.vn ở lần chạy đầu và chỉnh `syncWeb_`/`classify_` nếu lệch.
+Nút "Đồng bộ sản phẩm mới" gọi **Nhanh.vn Open API v3.0** (Business 200642), giống phần mềm kho / báo cáo doanh số: `POST https://pos.open.nhanh.vn/v3.0/product/list?appId=..&businessId=..`, header `Authorization: <accessToken>`, body JSON `{filters, paginator:{size:100, next}}`; danh mục `/v3.0/product/category`, nhãn hàng `/v3.0/product/brand`. Upsert `San_Pham` theo khóa chuẩn: mã (`code`), tên (`name`), ảnh (`images.avatar`, không có thì ảnh đầu `images.others`), giá niêm yết (`prices.retail`), Nhãn hàng (tên theo `brandId`), Danh mục (nhóm cha cao nhất theo `categoryId`), Dòng hàng (nhóm con; nếu thiếu suy từ tên). Mỗi lượt tối đa 5 trang (500 SP), phân trang bằng con trỏ `paginator.next` — admin gửi lại `next` đến khi `null`.
+- API v2.0 cũ (`https://open.nhanh.vn/api/product/search`) đã bỏ: trả trang HTML 404 → lỗi `Unexpected token '<'`.
+- Lỗi rõ ràng: Nhanh.vn hoặc Apps Script trả **HTML thay vì JSON** → log hiện nguồn (Nhanh.vn + đường dẫn / Apps Script + action), HTTP status, tiêu đề trang và 300 ký tự nội dung; Nhanh trả `code != 1` → log `errorCode` + `messages`; `ERR_429` → tự chờ `lockedSeconds` rồi gọi lại (tối đa 3 lần), giãn cách 250 ms / request.
+- Kiểm thử 18/11/2026 với dữ liệu thật: 1 lượt = 500 sản phẩm (đủ mã, tên, nhãn hàng, giá, danh mục); 500 SP đầu không có ảnh trên Nhanh, SP có ảnh (VD `P-AYPW051-4V`) trả đúng `images.avatar`.
 
 ## 3. Ẩn tồn, chỉ hiện size còn hàng
 Catalog công khai chỉ chứa `sizes[]` có `tồn > 0`. Sản phẩm không còn size nào, hoặc chưa có giá/chưa có trong `San_Pham`, bị ẩn. Khi đặt vượt tồn, server báo "không đủ hàng" không kèm số.

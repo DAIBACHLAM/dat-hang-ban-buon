@@ -87,8 +87,19 @@ const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;'
 const money=n=>Math.round(n).toLocaleString('vi-VN')+'đ';
 let PIN=sessionStorage.getItem('pin')||'';
 async function api(action,body){
-  const r=await fetch(API,{method:'POST',body:JSON.stringify(Object.assign({action,pin:PIN},body||{}))}).then(r=>r.json());
+  const res=await fetch(API,{method:'POST',body:JSON.stringify(Object.assign({action,pin:PIN},body||{}))});
+  const r=parseJsonOrExplain(await res.text(),`Apps Script (${action}, HTTP ${res.status})`);
   if(!r.ok)throw new Error(r.error||'Lỗi');return r;
+}
+/* Apps Script / Nhanh.vn trả HTML (trang lỗi, đăng nhập Google, 404...) thay vì JSON -> báo rõ nội dung thay cho "Unexpected token '<'" */
+function parseJsonOrExplain(text,where){
+  const t=String(text||'').trim();
+  try{return JSON.parse(t)}catch(e){
+    const title=((t.match(/<title[^>]*>([\s\S]*?)<\/title>/i)||[])[1]||'').trim();
+    const plain=t.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi,' ').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim();
+    const hint=/^</.test(t)?' — Kiểm tra: Deploy Web app "Who has access: Anyone", đã Deploy → Manage deployments → New version sau khi sửa Code.gs, API_URL trong config.js đúng link /exec.':'';
+    throw new Error(`${where} trả về ${/^</.test(t)?'HTML':'dữ liệu'} thay vì JSON${title?` — tiêu đề: "${title}"`:''} — nội dung: ${(plain||t).slice(0,300)}${hint}`);
+  }
 }
 function log(m,c){const l=$('#log');l.style.display='block';l.insertAdjacentHTML('beforeend',`<div class="${c||''}">${esc(m)}</div>`);l.scrollTop=l.scrollHeight}
 
@@ -244,9 +255,9 @@ $('#up').onclick=async()=>{
 
 /* ---------- Đồng bộ web gốc ---------- */
 $('#sync').onclick=async()=>{
-  const b=$('#sync');b.disabled=true;let page=1,n=0;
+  const b=$('#sync');b.disabled=true;let next=null,n=0,lot=0;
   try{
-    while(page){log(`Đồng bộ từ trang ${page}...`);const r=await api('syncWeb',{page});n+=r.synced;page=r.next;log(`  +${r.synced} sản phẩm (tổng ${r.totalPages} trang)`)}
+    do{lot++;log(`Đồng bộ lượt ${lot} (Nhanh.vn API v3.0, tối đa 500 SP / lượt)...`);const r=await api('syncWeb',{next});n+=r.synced;next=r.next;log(`  +${r.synced} sản phẩm (${r.pages} trang)${next?' — còn tiếp':''}`)}while(next);
     log(`✔ Xong, ${n} sản phẩm cập nhật mã/ảnh/giá/phân loại`,'ok');await loadAdmin();
   }catch(e){log('✘ '+e.message,'err')}
   b.disabled=false;

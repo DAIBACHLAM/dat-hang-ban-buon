@@ -5,9 +5,9 @@
  * Script Properties (Project Settings > Script properties):
  *   ADMIN_PIN          mã PIN trang admin (bắt buộc)
  *   NHANH_BUSINESS_ID  200642
- *   NHANH_APP_ID       appId Nhanh.vn
+ *   NHANH_APP_ID       appId Nhanh.vn (ứng dụng API v3.0)
  *   NHANH_SECRET_KEY   secretKey (dự phòng)
- *   NHANH_ACCESS_TOKEN accessToken Nhanh.vn
+ *   NHANH_ACCESS_TOKEN accessToken v3.0 — PHẢI cùng cặp với NHANH_APP_ID
  *
  * QUY TẮC: không bao giờ trả số tồn thực tế ra API công khai (catalog/order).
  */
@@ -42,7 +42,7 @@ function doPost(e) {
       case 'adminData': return json_(adminData_());
       case 'uploadStock': return json_(uploadStock_(req.rows));
       case 'saveDiscounts': return json_(saveDiscounts_(req.rows));
-      case 'syncWeb': return json_(syncWeb_(req.page || 1));
+      case 'syncWeb': return json_(syncWeb_(req.next || null));
       case 'orders': return json_(listOrders_());
       case 'orderStatus': return json_(setOrderStatus_(req.id, req.status));
     }
@@ -219,17 +219,62 @@ function setOrderStatus_(id, status) {
 }
 
 /* ---------- Đồng bộ từ Nhanh.vn (mixsport.vn + liningvietnam.com.vn dùng chung Business 200642) ---------- */
-function nhanh_(path, data) {
-  const res = UrlFetchApp.fetch('https://open.nhanh.vn' + path, {
-    method: 'post', muteHttpExceptions: true,
-    payload: {
-      version: '2.0', appId: prop_('NHANH_APP_ID'), businessId: prop_('NHANH_BUSINESS_ID') || '200642',
-      accessToken: prop_('NHANH_ACCESS_TOKEN'), data: JSON.stringify(data || {})
+/**
+ * Gọi Nhanh.vn Open API v3.0 — giống phần mềm kho / báo cáo doanh số (đã chạy ổn):
+ *   POST https://pos.open.nhanh.vn/v3.0<path>?appId=..&businessId=..
+ *   Header  Authorization: <accessToken>      Body JSON: { filters, paginator }
+ * (API v2.0 cũ https://open.nhanh.vn/api/... đã bỏ — trả trang HTML 404 "<!DOCTYPE html>").
+ * Trả về cả body { code, data, paginator }. Lỗi -> throw Error có HTTP status + nội dung Nhanh trả về.
+ */
+const NHANH_BASE = 'https://pos.open.nhanh.vn';
+function nhanh_(path, body) {
+  const url = NHANH_BASE + '/v3.0' + path + '?appId=' + encodeURIComponent(prop_('NHANH_APP_ID')) +
+    '&businessId=' + encodeURIComponent(prop_('NHANH_BUSINESS_ID') || '200642');
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const res = UrlFetchApp.fetch(url, {
+      method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+      headers: { Authorization: prop_('NHANH_ACCESS_TOKEN') },
+      payload: JSON.stringify(body || {})
+    });
+    const status = res.getResponseCode(), text = res.getContentText();
+    const j = parseJsonOrExplain_(text, 'Nhanh.vn ' + path + ' (HTTP ' + status + ')');
+    if ((j.errorCode === 'ERR_429' || j.errorCode === 'ERR_EXCEEDED_RATE_LIMIT') && attempt < 3) {
+      Utilities.sleep(1000 * ((Number((j.data || {}).lockedSeconds) || 10) + 1)); // Nhanh khoá tạm vì gọi quá nhanh -> chờ rồi gọi lại
+      continue;
     }
-  });
-  const j = JSON.parse(res.getContentText());
-  if (j.code !== 1) throw new Error('Nhanh.vn: ' + JSON.stringify(j.messages || j.errorCode || j));
-  return j.data;
+    if (Number(j.code) !== 1) {
+      const m = j.messages;
+      throw new Error('Nhanh.vn ' + path + ' lỗi' + (j.errorCode ? ' ' + j.errorCode : '') + ' (HTTP ' + status + '): ' +
+        (typeof m === 'string' ? m : JSON.stringify(m != null ? m : j)).slice(0, 400));
+    }
+    Utilities.sleep(250); // giãn cách < 150 request / 30 giây
+    return j;
+  }
+  throw new Error('Nhanh.vn ' + path + ': bị giới hạn tốc độ (ERR_429) quá nhiều lần, thử lại sau.');
+}
+/** JSON.parse có giải thích: nếu là HTML (trang lỗi / đăng nhập / 404) -> báo rõ HTTP + tiêu đề + đoạn nội dung. */
+function parseJsonOrExplain_(text, where) {
+  const t = String(text || '').trim();
+  try { return JSON.parse(t); } catch (e) {
+    const isHtml = /^</.test(t);
+    const title = (t.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
+    const plain = t.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    throw new Error(where + ' trả về ' + (isHtml ? 'HTML' : 'dữ liệu') + ' thay vì JSON' +
+      (title.trim() ? ' — tiêu đề: "' + title.trim() + '"' : '') + ' — nội dung: ' + (plain || t).slice(0, 300));
+  }
+}
+/** Lấy hết danh sách theo con trỏ paginator.next (v3.0) */
+function nhanhAll_(path, filters, maxPages) {
+  const out = []; let next = null;
+  for (let i = 0; i < (maxPages || 50); i++) {
+    const body = { filters: filters || {}, paginator: { size: 100 } };
+    if (next) body.paginator.next = next;
+    const j = nhanh_(path, body);
+    toArr_(j.data).forEach(x => out.push(x));
+    next = (j.paginator || {}).next;
+    if (!next || !toArr_(j.data).length) break;
+  }
+  return out;
 }
 function toArr_(x) { return Array.isArray(x) ? x : (x ? Object.keys(x).map(k => x[k]) : []); }
 
@@ -240,7 +285,7 @@ function loadCategories_() {
       map[c.id] = { name: c.name, parent: c.parentId || parent || 0 };
       if (c.childs || c.children) flat(c.childs || c.children, c.id);
     });
-    flat(nhanh_('/api/product/category', {}));
+    flat(nhanhAll_('/product/category', {}, 20));
   } catch (e) { /* bỏ qua, sẽ phân loại theo tên */ }
   return map;
 }
@@ -261,27 +306,39 @@ function classify_(p, cats) {
   return { category: category, line: line || 'Khác' };
 }
 
-/** Mỗi lần gọi xử lý tối đa 5 trang (500 SP). Admin gọi lặp tới khi next=null. */
-function syncWeb_(page) {
-  if (!prop_('NHANH_ACCESS_TOKEN')) return { ok: false, error: 'Chưa cấu hình NHANH_ACCESS_TOKEN trong Script Properties' };
-  const cats = loadCategories_();
+function loadBrands_() {
+  const map = {};
+  try { nhanhAll_('/product/brand', {}, 20).forEach(b => { map[b.id] = b.name; }); } catch (e) { /* không có tên hãng -> giữ tên cũ */ }
+  return map;
+}
+
+/** Mỗi lần gọi xử lý tối đa 5 trang (500 SP) của /v3.0/product/list. Admin gọi lặp, gửi lại `next` (con trỏ) tới khi next = null. */
+function syncWeb_(cursor) {
+  if (!prop_('NHANH_ACCESS_TOKEN') || !prop_('NHANH_APP_ID')) return { ok: false, error: 'Chưa cấu hình NHANH_APP_ID / NHANH_ACCESS_TOKEN (API v3.0) trong Script Properties' };
+  const cats = loadCategories_(), brands = loadBrands_();
   const have = {}; read_(SH.PROD).forEach(p => have[p.key] = p);
   const t = Utilities.formatDate(new Date(), 'Asia/Ho_Chi_Minh', 'yyyy-MM-dd HH:mm');
-  let p = page, totalPages = page, count = 0;
-  for (let i = 0; i < 5 && p <= totalPages; i++, p++) {
-    const d = nhanh_('/api/product/search', { page: p, icpp: 100 });
-    totalPages = Number(d.totalPages) || p;
-    toArr_(d.products).forEach(x => {
+  let next = cursor || null, count = 0, pages = 0;
+  for (let i = 0; i < 5; i++) {
+    const body = { filters: {}, paginator: { size: 100 } };
+    if (next) body.paginator.next = next;
+    const j = nhanh_('/product/list', body);
+    const list = toArr_(j.data);
+    pages++;
+    list.forEach(x => {
       const key = canon_(x.code); if (!key) return;
       const cl = classify_(x, cats), old = have[key] || {};
+      const prices = x.prices || {}, images = x.images || {};
       have[key] = {
-        key: key, ma: x.code, ten: x.name, brand: x.brandName || x.brand || old.brand || '',
-        category: cl.category, line: cl.line, gia: Number(x.price) || Number(old.gia) || 0,
-        anh: x.image || old.anh || '', url: x.link || old.url || '', updated: t
+        key: key, ma: x.code, ten: x.name, brand: brands[x.brandId] || old.brand || '',
+        category: cl.category, line: cl.line, gia: Number(prices.retail) || Number(old.gia) || 0,
+        anh: images.avatar || (images.others || [])[0] || old.anh || '', url: old.url || '', updated: t
       };
       count++;
     });
+    next = (j.paginator || {}).next || null;
+    if (!next || !list.length) { next = null; break; }
   }
   writeAll_(SH.PROD, Object.keys(have).map(k => HEAD.San_Pham.map(h => have[k][h] === undefined ? '' : have[k][h])));
-  return { ok: true, synced: count, next: p <= totalPages ? p : null, totalPages: totalPages };
+  return { ok: true, synced: count, pages: pages, next: next };
 }
