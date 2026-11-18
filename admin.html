@@ -91,7 +91,7 @@ async function api(action,body){
   const r=parseJsonOrExplain(await res.text(),`Apps Script (${action}, HTTP ${res.status})`);
   if(!r.ok)throw new Error(r.error||'Lỗi');return r;
 }
-/* Apps Script / Nhanh.vn trả HTML (trang lỗi, đăng nhập Google, 404...) thay vì JSON -> báo rõ nội dung thay cho "Unexpected token '<'" */
+/* Apps Script trả HTML (trang lỗi, đăng nhập Google, 404...) thay vì JSON -> báo rõ nội dung thay cho "Unexpected token '<'" */
 function parseJsonOrExplain(text,where){
   const t=String(text||'').trim();
   try{return JSON.parse(t)}catch(e){
@@ -255,10 +255,11 @@ $('#up').onclick=async()=>{
 
 /* ---------- Đồng bộ web gốc ---------- */
 $('#sync').onclick=async()=>{
+  if(!confirm('XÓA SẠCH toàn bộ sản phẩm cũ và nạp lại từ mixsport.vn + liningvietnam.com.vn?'))return;
   const b=$('#sync');b.disabled=true;let next=null,n=0,lot=0;
   try{
-    do{lot++;log(`Đồng bộ lượt ${lot} (Nhanh.vn API v3.0, tối đa 500 SP / lượt)...`);const r=await api('syncWeb',{next});n+=r.synced;next=r.next;log(`  +${r.synced} sản phẩm (${r.pages} trang)${next?' — còn tiếp':''}`)}while(next);
-    log(`✔ Xong, ${n} sản phẩm cập nhật mã/ảnh/giá/phân loại`,'ok');await loadAdmin();
+    do{lot++;log(`Đồng bộ lượt ${lot}${lot===1?' (đã xóa dữ liệu cũ)':''} — Haravan products.json...`);const r=await api('syncWeb',{next});n+=r.synced;next=r.next;log(`  +${r.synced} sản phẩm hợp lệ, bỏ ${r.skipped} (ẩn/không ảnh/không SKU) · ${r.pages} trang${next?' — còn tiếp':''}`)}while(next);
+    log(`✔ Xong, ${n} lượt sản phẩm nạp từ 2 web (mẫu trùng giữa 2 web đã gộp)`,'ok');await loadAdmin();
   }catch(e){log('✘ '+e.message,'err')}
   b.disabled=false;
 };
@@ -274,7 +275,7 @@ async function loadAdmin(){
     $('#dGrid').innerHTML=sec('Nhãn hàng','brand',AD.brands)+sec('Danh mục','category',AD.categories)+sec('Dòng hàng','line',AD.lines);
     const s=AD.stats;
     $('#stat').insertAdjacentHTML('afterend','');
-    $('#dmsg').textContent=`Hệ thống: ${s.products} SP · ${s.stockCodes} mã có tồn · ${s.pieces} sp`+(s.unmatchedCount?` · ⚠ ${s.unmatchedCount} mã tồn chưa có thông tin web (bấm Đồng bộ)`:'');
+    $('#dmsg').textContent=`Hệ thống: ${s.products} SP · ${s.stockCodes} mã có tồn · ${s.pieces} sp`+(s.unmatchedCount?` · ⚠ ${s.unmatchedCount} mã tồn không thuộc sản phẩm nào trên 2 web (sẽ không hiển thị)`:'');
   }catch(e){log('✘ '+e.message,'err')}
 }
 $('#saveD').onclick=async()=>{

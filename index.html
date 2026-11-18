@@ -141,11 +141,11 @@ function setData(arr){
   render();
 }
 function load(){
-  const cached=LS.get('catalog',null);
+  const cached=LS.get('catalog2',null);
   if(cached)setData(cached);else $('#grid').innerHTML='<div class="skel"></div>'.repeat(6);
   fetch(CFG.API_URL).then(r=>r.json()).then(j=>{
     if(!j.ok)throw new Error(j.error);
-    LS.set('catalog',j.products);setData(j.products);
+    LS.set('catalog2',j.products);setData(j.products);
   }).catch(e=>{if(!cached)$('#grid').innerHTML='<div class="empty">Không tải được dữ liệu. Vui lòng thử lại.</div>'});
 }
 
