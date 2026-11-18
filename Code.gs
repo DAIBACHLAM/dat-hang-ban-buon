@@ -4,10 +4,7 @@
  *
  * Script Properties (Project Settings > Script properties):
  *   ADMIN_PIN          mã PIN trang admin (bắt buộc)
- *   NHANH_BUSINESS_ID  200642
- *   NHANH_APP_ID       appId Nhanh.vn (ứng dụng API v3.0)
- *   NHANH_SECRET_KEY   secretKey (dự phòng)
- *   NHANH_ACCESS_TOKEN accessToken v3.0 — PHẢI cùng cặp với NHANH_APP_ID
+ * (Đồng bộ sản phẩm lấy từ products.json công khai của 2 web Haravan — không cần token Nhanh.vn.)
  *
  * QUY TẮC: không bao giờ trả số tồn thực tế ra API công khai (catalog/order).
  */
@@ -16,7 +13,7 @@ const SH = {
   PROD: 'San_Pham', STOCK: 'Ton_Buon', DISC: 'Chiet_Khau', ORD: 'Don_Buon'
 };
 const HEAD = {
-  San_Pham: ['key', 'ma', 'ten', 'brand', 'category', 'line', 'gia', 'anh', 'url', 'updated'],
+  San_Pham: ['key', 'ma', 'ten', 'brand', 'category', 'line', 'gia', 'anh', 'url', 'updated', 'variants', 'site'],
   Ton_Buon: ['key', 'size', 'ton', 'updated'],
   Chiet_Khau: ['level', 'name', 'pct'],
   Don_Buon: ['id', 'time', 'name', 'phone', 'note', 'status', 'total', 'items']
@@ -121,20 +118,53 @@ function discountOf_(p, d) {
 }
 function unitPrice_(gia, pct) { return Math.round(Number(gia) * (100 - pct) / 100); }
 
+/* ---------- Tồn theo sản phẩm Haravan ---------- */
+/** Chuẩn hóa size — PHẢI giống normSize() trong admin.html */
+function normSize_(v) {
+  let s = String(v == null ? '' : v).trim().toUpperCase().replace(/\s+/g, '');
+  if (!s || s === 'NO' || s === 'FREE' || s === 'FREESIZE' || s === 'F' || s === 'DEFAULTTITLE') return 'FREESIZE';
+  s = s.replace(/^A\//, '');
+  if (s === 'XXL') s = '2XL';
+  return s;
+}
+function loadStock_() {
+  const m = {};
+  read_(SH.STOCK).forEach(r => { m[r.key + '|' + normSize_(r.size)] = Number(r.ton) || 0; });
+  return m;
+}
+function variantsOf_(p) {
+  try { const v = JSON.parse(p.variants); return Array.isArray(v) ? v : []; } catch (e) { return []; }
+}
+/** {size: tồn} cho 1 sản phẩm — khớp mã (barcode/sku chuẩn hóa) × size (theo option Haravan, rồi theo đuôi SKU); mỗi (mã,size) chỉ tính 1 lần. CHỈ dùng nội bộ server/admin. */
+function stockSizes_(p, stock) {
+  const out = {}, seen = {};
+  variantsOf_(p).forEach(v => {
+    for (const key of [v.k, v.b]) {
+      if (!key) continue;
+      for (const z of [v.z, v.u]) {
+        if (!z) continue;
+        const id = key + '|' + z;
+        if (stock[id] === undefined) continue;
+        if (!seen[id]) { seen[id] = 1; out[v.z] = (out[v.z] || 0) + stock[id]; }
+        return;
+      }
+    }
+  });
+  return out;
+}
+
 /* ---------- Catalog công khai (KHÔNG có số tồn) ---------- */
 function buildCatalog_() {
-  const disc = loadDisc_();
-  const sizes = {};
-  read_(SH.STOCK).forEach(r => {
-    if (Number(r.ton) > 0) (sizes[r.key] = sizes[r.key] || []).push(String(r.size));
-  });
+  const disc = loadDisc_(), stock = loadStock_();
   const products = [];
   read_(SH.PROD).forEach(p => {
-    const s = sizes[p.key];
-    if (!s || !Number(p.gia)) return; // không tồn hoặc chưa có giá -> ẩn
+    if (!Number(p.gia) || !p.anh) return;
+    const ss = stockSizes_(p, stock);
+    const sizes = Object.keys(ss).filter(z => ss[z] > 0).sort(sizeCmp_);
+    if (!sizes.length) return; // không size nào còn tồn -> ẩn
     products.push({
       k: p.key, m: p.ma, n: p.ten, b: p.brand, c: p.category, l: p.line,
-      g: Number(p.gia), i: p.anh, s: s.sort(sizeCmp_), d: discountOf_(p, disc)
+      g: Number(p.gia), i: p.anh, s: sizes, d: discountOf_(p, disc)
     });
   });
   return { ok: true, ts: Date.now(), products: products };
@@ -149,13 +179,13 @@ function submitOrder_(req) {
   lock.waitLock(20000);
   try {
     const prods = {}; read_(SH.PROD).forEach(p => prods[p.key] = p);
-    const stock = {}; read_(SH.STOCK).forEach(r => stock[r.key + '|' + r.size] = Number(r.ton));
+    const stock = loadStock_();
     const disc = loadDisc_();
     const lines = []; let total = 0;
     for (const it of req.items) {
       const p = prods[it.k], qty = Math.floor(Number(it.qty));
       if (!p || !(qty > 0)) return { ok: false, error: 'Sản phẩm không hợp lệ' };
-      if ((stock[it.k + '|' + it.size] || 0) < qty)
+      if ((stockSizes_(p, stock)[normSize_(it.size)] || 0) < qty)
         return { ok: false, error: 'Mã ' + p.ma + ' size ' + it.size + ' không đủ hàng, vui lòng giảm số lượng hoặc bỏ size này' };
       const pct = discountOf_(p, disc), unit = unitPrice_(p.gia, pct);
       lines.push({ k: it.k, ma: p.ma, ten: p.ten, brand: p.brand, category: p.category, line: p.line,
@@ -177,7 +207,9 @@ function adminData_() {
   const have = {}; prods.forEach(p => have[p.key] = 1);
   const stockKeys = {}; let pieces = 0;
   stock.forEach(r => { stockKeys[r.key] = 1; pieces += Number(r.ton) || 0; });
-  const unmatched = Object.keys(stockKeys).filter(k => !have[k]);
+  const matched = {};
+  prods.forEach(p => variantsOf_(p).forEach(v => { if (v.k) matched[v.k] = 1; if (v.b) matched[v.b] = 1; }));
+  const unmatched = Object.keys(stockKeys).filter(k => !matched[k]); // mã có tồn nhưng không thuộc sản phẩm nào trên 2 web
   const uniq = f => Array.from(new Set(prods.map(p => p[f]).filter(Boolean))).sort();
   return {
     ok: true,
@@ -202,10 +234,10 @@ function saveDiscounts_(rows) {
 }
 
 function listOrders_() {
-  const stock = {}; read_(SH.STOCK).forEach(r => stock[r.key + '|' + r.size] = Number(r.ton));
+  const stock = loadStock_(), prods = {}; read_(SH.PROD).forEach(p => prods[p.key] = p);
   const orders = read_(SH.ORD).reverse().slice(0, 300).map(o => {
     let lines = []; try { lines = JSON.parse(o.items); } catch (e) {}
-    lines.forEach(l => { l.ton = stock[l.k + '|' + l.size] || 0; }); // chỉ admin thấy tồn
+    lines.forEach(l => { l.ton = prods[l.k] ? (stockSizes_(prods[l.k], stock)[normSize_(l.size)] || 0) : 0; }); // chỉ admin thấy tồn
     return { id: o.id, time: o.time, name: o.name, phone: String(o.phone).replace(/^'/, ''), note: o.note, status: o.status, total: o.total, lines: lines };
   });
   return { ok: true, orders: orders };
@@ -218,127 +250,185 @@ function setOrderStatus_(id, status) {
   return { ok: false, error: 'Không thấy đơn' };
 }
 
-/* ---------- Đồng bộ từ Nhanh.vn (mixsport.vn + liningvietnam.com.vn dùng chung Business 200642) ---------- */
-/**
- * Gọi Nhanh.vn Open API v3.0 — giống phần mềm kho / báo cáo doanh số (đã chạy ổn):
- *   POST https://pos.open.nhanh.vn/v3.0<path>?appId=..&businessId=..
- *   Header  Authorization: <accessToken>      Body JSON: { filters, paginator }
- * (API v2.0 cũ https://open.nhanh.vn/api/... đã bỏ — trả trang HTML 404 "<!DOCTYPE html>").
- * Trả về cả body { code, data, paginator }. Lỗi -> throw Error có HTTP status + nội dung Nhanh trả về.
- */
-const NHANH_BASE = 'https://pos.open.nhanh.vn';
-function nhanh_(path, body) {
-  const url = NHANH_BASE + '/v3.0' + path + '?appId=' + encodeURIComponent(prop_('NHANH_APP_ID')) +
-    '&businessId=' + encodeURIComponent(prop_('NHANH_BUSINESS_ID') || '200642');
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const res = UrlFetchApp.fetch(url, {
-      method: 'post', contentType: 'application/json', muteHttpExceptions: true,
-      headers: { Authorization: prop_('NHANH_ACCESS_TOKEN') },
-      payload: JSON.stringify(body || {})
-    });
-    const status = res.getResponseCode(), text = res.getContentText();
-    const j = parseJsonOrExplain_(text, 'Nhanh.vn ' + path + ' (HTTP ' + status + ')');
-    if ((j.errorCode === 'ERR_429' || j.errorCode === 'ERR_EXCEEDED_RATE_LIMIT') && attempt < 3) {
-      Utilities.sleep(1000 * ((Number((j.data || {}).lockedSeconds) || 10) + 1)); // Nhanh khoá tạm vì gọi quá nhanh -> chờ rồi gọi lại
-      continue;
-    }
-    if (Number(j.code) !== 1) {
-      const m = j.messages;
-      throw new Error('Nhanh.vn ' + path + ' lỗi' + (j.errorCode ? ' ' + j.errorCode : '') + ' (HTTP ' + status + '): ' +
-        (typeof m === 'string' ? m : JSON.stringify(m != null ? m : j)).slice(0, 400));
-    }
-    Utilities.sleep(250); // giãn cách < 150 request / 30 giây
-    return j;
-  }
-  throw new Error('Nhanh.vn ' + path + ': bị giới hạn tốc độ (ERR_429) quá nhiều lần, thử lại sau.');
-}
-/** JSON.parse có giải thích: nếu là HTML (trang lỗi / đăng nhập / 404) -> báo rõ HTTP + tiêu đề + đoạn nội dung. */
+/* ---------- Đồng bộ từ 2 web Haravan (collections/all/products.json công khai) ---------- */
+const SITES = [
+  { name: 'mixsport.vn', base: 'https://mixsport.vn', brand: '' },
+  { name: 'liningvietnam.com.vn', base: 'https://liningvietnam.com.vn', brand: 'Li-Ning' }
+];
+const HARAVAN_LIMIT = 250;
+// Thử lần lượt từng endpoint ở trang 1, dùng endpoint đầu tiên trả được sản phẩm. (Kiểm tra 18/11/2026: /products.json trả 404 trên cả 2 web; /collections/all/products.json chạy nhưng chỉ trả tối đa 50 SP/trang dù limit=250.)
+const HARAVAN_PATHS = ['/products.json', '/collections/all/products.json'];
+
 function parseJsonOrExplain_(text, where) {
   const t = String(text || '').trim();
   try { return JSON.parse(t); } catch (e) {
-    const isHtml = /^</.test(t);
     const title = (t.match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
     const plain = t.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-    throw new Error(where + ' trả về ' + (isHtml ? 'HTML' : 'dữ liệu') + ' thay vì JSON' +
+    throw new Error(where + ' trả về ' + (/^</.test(t) ? 'HTML' : 'dữ liệu') + ' thay vì JSON' +
       (title.trim() ? ' — tiêu đề: "' + title.trim() + '"' : '') + ' — nội dung: ' + (plain || t).slice(0, 300));
   }
 }
-/** Lấy hết danh sách theo con trỏ paginator.next (v3.0) */
-function nhanhAll_(path, filters, maxPages) {
-  const out = []; let next = null;
-  for (let i = 0; i < (maxPages || 50); i++) {
-    const body = { filters: filters || {}, paginator: { size: 100 } };
-    if (next) body.paginator.next = next;
-    const j = nhanh_(path, body);
-    toArr_(j.data).forEach(x => out.push(x));
-    next = (j.paginator || {}).next;
-    if (!next || !toArr_(j.data).length) break;
-  }
-  return out;
-}
-function toArr_(x) { return Array.isArray(x) ? x : (x ? Object.keys(x).map(k => x[k]) : []); }
+function fold_(s) { return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/đ/g, 'd').toLowerCase(); }
 
-function loadCategories_() {
-  const map = {};
-  try {
-    const flat = (list, parent) => toArr_(list).forEach(c => {
-      map[c.id] = { name: c.name, parent: c.parentId || parent || 0 };
-      if (c.childs || c.children) flat(c.childs || c.children, c.id);
-    });
-    flat(nhanhAll_('/product/category', {}, 20));
-  } catch (e) { /* bỏ qua, sẽ phân loại theo tên */ }
-  return map;
-}
-/** Danh mục = nhóm cha cấp cao nhất; Dòng hàng = nhóm con (hoặc suy từ tên) */
-function classify_(p, cats) {
-  let c = cats[p.categoryId], category = '', line = '';
-  if (c) {
-    const chain = [c]; while (chain[0].parent && cats[chain[0].parent]) chain.unshift(cats[chain[0].parent]);
-    category = chain[0].name; line = chain.length > 1 ? chain[chain.length - 1].name : '';
+/** Không bao giờ ném lỗi: trả {ok, products, error}. Thử lại 1 lần khi lỗi mạng / HTTP != 200 / không phải JSON. */
+function fetchHaravan_(site, pathIdx, page) {
+  const url = site.base + HARAVAN_PATHS[pathIdx] + '?limit=' + HARAVAN_LIMIT + '&page=' + page;
+  let error = '';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt) Utilities.sleep(1500);
+    try {
+      const res = UrlFetchApp.fetch(url, { muteHttpExceptions: true, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' } });
+      const code = res.getResponseCode();
+      if (code !== 200) { error = 'HTTP ' + code; continue; }
+      const j = JSON.parse(res.getContentText());
+      return { ok: true, products: Array.isArray(j.products) ? j.products : [], error: '' };
+    } catch (e) { error = String(e).slice(0, 160); }
   }
-  const n = String(p.name || '').toLowerCase();
-  if (!category) category = /giày|dép|sandal/.test(n) ? 'Giày dép' : /balo|túi|vợt|bóng|tất|vớ|mũ|nón|băng|phụ kiện/.test(n) ? 'Phụ kiện' : 'Quần áo';
-  if (!line) {
-    const rules = [[/chạy bộ|running/, 'Giày chạy bộ'], [/cầu lông/, 'Giày cầu lông'], [/pickleball|tennis/, 'Giày Pickleball/Tennis'],
-      [/polo/, 'Áo Polo'], [/t-?shirt|áo thun|áo phông/, 'Áo T-shirt'], [/short|quần ngắn/, 'Quần Short'], [/balo|túi/, 'Balo/Túi'], [/giày/, 'Giày thời trang']];
-    for (const r of rules) if (r[0].test(n)) { line = r[1]; break; }
-  }
-  return { category: category, line: line || 'Khác' };
+  return { ok: false, products: [], error: site.name + ' ' + HARAVAN_PATHS[pathIdx] + ' trang ' + page + ': ' + error };
 }
 
-function loadBrands_() {
-  const map = {};
-  try { nhanhAll_('/product/brand', {}, 20).forEach(b => { map[b.id] = b.name; }); } catch (e) { /* không có tên hãng -> giữ tên cũ */ }
-  return map;
+/** Bỏ hậu tố size khỏi SKU: chỉ bỏ khi hậu tố đúng bằng size của chính variant đó (không đụng mã màu như -4). */
+function baseSku_(sku, rawSize) {
+  const s = String(sku || '').trim().toUpperCase();
+  if (!s) return '';
+  const r = String(rawSize || '').trim().toUpperCase(), cands = {};
+  [r, r.replace(/^A\//, ''), normSize_(r)].forEach(c => { if (c && c !== 'FREESIZE' && c !== 'DEFAULTTITLE') cands[c] = 1; });
+  for (const c in cands) {
+    const re = new RegExp('[-_\\s]+(A\\/)?' + c.replace(/[.*+?^${}()|[\]\\\/]/g, '\\$&') + '$');
+    if (re.test(s)) return s.replace(re, '');
+  }
+  return s;
 }
 
-/** Mỗi lần gọi xử lý tối đa 5 trang (500 SP) của /v3.0/product/list. Admin gọi lặp, gửi lại `next` (con trỏ) tới khi next = null. */
+// [regex trên chữ không dấu, Dòng hàng, Danh mục]
+const LINE_RULES = [
+  [/giay.*(chay|running)|running/, 'Giày chạy bộ', 'Giày dép'],
+  [/giay.*cau long/, 'Giày cầu lông', 'Giày dép'],
+  [/giay.*(pickleball|tennis)/, 'Giày Pickleball/Tennis', 'Giày dép'],
+  [/giay.*bong ro/, 'Giày bóng rổ', 'Giày dép'],
+  [/giay.*(bong da|futsal)/, 'Giày bóng đá', 'Giày dép'],
+  [/giay|\bdep\b|sandal/, 'Giày thời trang', 'Giày dép'],
+  [/polo/, 'Áo Polo', 'Quần áo'],
+  [/t-?shirt|ao thun|ao phong/, 'Áo T-shirt', 'Quần áo'],
+  [/ao khoac|jacket|hoodie|ao ni\b|ao gio/, 'Áo khoác', 'Quần áo'],
+  [/\bvay\b|\bdam\b/, 'Váy/Đầm', 'Quần áo'],
+  [/short|quan ngan/, 'Quần Short', 'Quần áo'],
+  [/\bquan\b(?! ao)/, 'Quần dài', 'Quần áo'],
+  [/\bao\b/, 'Áo khác', 'Quần áo'],
+  [/balo|\btui\b|backpack/, 'Balo/Túi', 'Phụ kiện'],
+  [/\bvot\b|qua cau|\bluoi\b|\bbong\b/, 'Dụng cụ thể thao', 'Dụng cụ thể thao'],
+  [/\btat\b|\bvo\b|\bmu\b|\bnon\b|\bbang\b|phu kien/, 'Phụ kiện khác', 'Phụ kiện'],
+  [/quan ao|thoi trang/, 'Quần áo khác', 'Quần áo']
+];
+/** Danh mục / Dòng hàng: ưu tiên tên sản phẩm, rồi product_type + tags của Haravan */
+function classifyHaravan_(hp) {
+  const tags = Array.isArray(hp.tags) ? hp.tags.join(' ') : String(hp.tags || '');
+  for (const txt of [fold_(hp.title), fold_(hp.product_type + ' ' + tags)]) {
+    for (const r of LINE_RULES) if (r[0].test(txt)) return { line: r[1], category: r[2] };
+  }
+  return { line: String(hp.product_type || '').trim() || 'Khác', category: 'Khác' };
+}
+
+/**
+ * 1 product Haravan -> các dòng San_Pham, mỗi dòng = 1 Mã NB (barcode) gom TẤT CẢ size vào `variants` (1 card).
+ * Web Li-Ning "GỘP MÀU": 1 product có nhiều màu = nhiều Mã NB -> mỗi màu 1 card (tên thêm tên màu) để size/tồn không lẫn màu.
+ * Bỏ: ẩn (published_at null), không ảnh, không SKU/barcode.
+ * Mã gốc ưu tiên `barcode` (sạch, vd P-AKPW001-12V); không có thì lấy SKU và bỏ hậu tố size của chính variant.
+ */
+function mapHaravan_(hp, site, t) {
+  if (!hp.published_at) return [];
+  const imgs = hp.images || [];
+  if (!imgs.length && !(hp.image && hp.image.src)) return [];
+  const optIdx = re => (hp.options || []).findIndex(o => re.test(fold_(o.name)));
+  const si = optIdx(/size|kich/), ci = optIdx(/mau|color/); // si < 0: sản phẩm chỉ có option Màu -> size lấy từ đuôi SKU
+  const groups = {};
+  (hp.variants || []).forEach(v => {
+    const raw = si >= 0 ? (v['option' + (si + 1)] || '') : '';
+    const bar = String(v.barcode || '').trim().toUpperCase(), sku = String(v.sku || '').trim().toUpperCase();
+    const skuBase = baseSku_(sku, raw);
+    const rawKey = bar || skuBase;
+    const k = canon_(rawKey);
+    if (!k) return;
+    let u = '';  // đuôi size trong SKU (vd UK 4.5) — dự phòng khi file tồn dùng size khác option Haravan
+    if (bar && sku.indexOf(bar) === 0) u = normSize_(sku.slice(bar.length).replace(/^[-_\s]+/, ''));
+    const b = canon_(skuBase) !== k ? canon_(skuBase) : '';
+    u = u === 'FREESIZE' ? '' : u;
+    let z = si >= 0 ? normSize_(raw) : (u || 'FREESIZE');
+    if (String(raw).trim().toUpperCase() === 'CHUNG') z = 'FREESIZE'; // "Chung" = freesize
+    const g = groups[k] = groups[k] || { raw: rawKey, vs: [], color: '', img: '', price: 0 };
+    if (!g.vs.some(x => x.z === z)) g.vs.push({ k: k, b: b, z: z, u: u });
+    if (ci >= 0 && !g.color) g.color = String(v['option' + (ci + 1)] || '').replace(/\s*\([^)]*\)\s*$/, '').trim();
+    if (!g.img && v.image_id) { const im = imgs.find(i => i.id === v.image_id); if (im) g.img = im.src; }
+    g.price = Math.max(g.price, Number(v.price) || 0, Number(v.compare_at_price) || 0);
+  });
+  const keys = Object.keys(groups), cl = classifyHaravan_(hp);
+  const firstImg = (imgs[0] && imgs[0].src) || (hp.image && hp.image.src) || '';
+  return keys.map(k => {
+    const g = groups[k];
+    return {
+      key: k, ma: g.raw, ten: keys.length > 1 && g.color ? hp.title + ' - ' + g.color : hp.title,
+      brand: String(hp.vendor || '').trim() || site.brand, category: cl.category, line: cl.line, gia: g.price,
+      anh: g.img || firstImg, url: site.base + '/products/' + hp.handle, updated: t, site: site.name, variants: g.vs
+    };
+  });
+}
+
+function resetSheet_(name) {
+  const s = sheet_(name);
+  s.clear();
+  s.getRange(1, 1, 1, HEAD[name].length).setValues([HEAD[name]]).setFontWeight('bold');
+  s.setFrozenRows(1);
+}
+
+/**
+ * Lượt đầu (cursor = null): XÓA SẠCH San_Pham rồi quét 2 web Haravan. Mỗi lượt ≤ ~150 giây / 40 trang.
+ * KHÔNG ném lỗi khi 1 trang hỏng: dừng web đó, giữ nguyên mọi sản phẩm đã lấy, ghi vào Sheets và trả `warnings`.
+ * Trang rỗng = hết sản phẩm của web đó. Con trỏ next = {s: web, p: trang, e: endpoint} tới khi null.
+ */
 function syncWeb_(cursor) {
-  if (!prop_('NHANH_ACCESS_TOKEN') || !prop_('NHANH_APP_ID')) return { ok: false, error: 'Chưa cấu hình NHANH_APP_ID / NHANH_ACCESS_TOKEN (API v3.0) trong Script Properties' };
-  const cats = loadCategories_(), brands = loadBrands_();
-  const have = {}; read_(SH.PROD).forEach(p => have[p.key] = p);
+  const t0 = Date.now();
+  let s = 0, p = 1, e = -1;
+  if (!cursor) resetSheet_(SH.PROD); else { s = Number(cursor.s) || 0; p = Number(cursor.p) || 1; e = cursor.e === undefined ? -1 : Number(cursor.e); }
+  const have = {}, warnings = [];
+  read_(SH.PROD).forEach(r => { r.variants = variantsOf_(r); have[r.key] = r; });
   const t = Utilities.formatDate(new Date(), 'Asia/Ho_Chi_Minh', 'yyyy-MM-dd HH:mm');
-  let next = cursor || null, count = 0, pages = 0;
-  for (let i = 0; i < 5; i++) {
-    const body = { filters: {}, paginator: { size: 100 } };
-    if (next) body.paginator.next = next;
-    const j = nhanh_('/product/list', body);
-    const list = toArr_(j.data);
-    pages++;
-    list.forEach(x => {
-      const key = canon_(x.code); if (!key) return;
-      const cl = classify_(x, cats), old = have[key] || {};
-      const prices = x.prices || {}, images = x.images || {};
-      have[key] = {
-        key: key, ma: x.code, ten: x.name, brand: brands[x.brandId] || old.brand || '',
-        category: cl.category, line: cl.line, gia: Number(prices.retail) || Number(old.gia) || 0,
-        anh: images.avatar || (images.others || [])[0] || old.anh || '', url: old.url || '', updated: t
-      };
-      count++;
-    });
-    next = (j.paginator || {}).next || null;
-    if (!next || !list.length) { next = null; break; }
+  let count = 0, skipped = 0, pages = 0;
+  try {
+    while (s < SITES.length && pages < 40 && Date.now() - t0 < 150000) {
+      const site = SITES[s];
+      let list = [], fail = '';
+      if (p === 1 || e < 0) { // chọn endpoint chạy được cho web này
+        e = -1;
+        for (let i = 0; i < HARAVAN_PATHS.length && e < 0; i++) {
+          const r = fetchHaravan_(site, i, 1); pages++;
+          if (r.ok && r.products.length) { e = i; list = r.products; } else fail = r.error || (site.name + ' ' + HARAVAN_PATHS[i] + ': không có sản phẩm');
+          Utilities.sleep(300);
+        }
+        if (e < 0) { warnings.push(fail); s++; p = 1; e = -1; continue; }
+      } else {
+        const r = fetchHaravan_(site, e, p); pages++;
+        if (!r.ok) { warnings.push(r.error + ' — dừng web này, đã giữ các trang trước'); s++; p = 1; e = -1; continue; }
+        list = r.products;
+        Utilities.sleep(300);
+      }
+      list.forEach(hp => {
+        const rows = mapHaravan_(hp, site, t);
+        if (!rows.length) { skipped++; return; }
+        rows.forEach(r => {
+          const old = have[r.key];
+          if (old) { // đã có từ web trước: giữ thông tin cũ, chỉ hợp nhất variants
+            const seen = {}; old.variants.forEach(v => seen[v.k + '|' + v.z] = 1);
+            r.variants.forEach(v => { if (!seen[v.k + '|' + v.z]) old.variants.push(v); });
+          } else have[r.key] = r;
+          count++;
+        });
+      });
+      if (!list.length || p >= 400) { s++; p = 1; e = -1; } else p++; // trang rỗng = hết web
+    }
+  } catch (err) { // lưới an toàn cuối: không bao giờ mất dữ liệu đã lấy
+    warnings.push('Lỗi bất ngờ: ' + String(err).slice(0, 200)); s = SITES.length;
   }
-  writeAll_(SH.PROD, Object.keys(have).map(k => HEAD.San_Pham.map(h => have[k][h] === undefined ? '' : have[k][h])));
-  return { ok: true, synced: count, pages: pages, next: next };
+  writeAll_(SH.PROD, Object.keys(have).map(k => HEAD.San_Pham.map(h => h === 'variants' ? JSON.stringify(have[k].variants) : (have[k][h] === undefined ? '' : have[k][h]))));
+  return { ok: true, synced: count, skipped: skipped, pages: pages, warnings: warnings, total: Object.keys(have).length,
+    site: s < SITES.length ? SITES[s].name : '', next: s < SITES.length ? { s: s, p: p, e: e } : null };
 }

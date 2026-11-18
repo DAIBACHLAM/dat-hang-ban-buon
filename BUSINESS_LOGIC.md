@@ -9,14 +9,18 @@
 
 Khóa chuẩn = `canon(Mã NB)`: viết hoa, bỏ khoảng trắng, bỏ `P-` đầu, bỏ `V|C` sau chữ số cuối. Đẩy tồn = **thay thế toàn bộ** sheet `Ton_Buon`.
 
-## 2. Đồng bộ từ web gốc
-Nút "Đồng bộ sản phẩm mới" gọi **Nhanh.vn Open API v3.0** (Business 200642), giống phần mềm kho / báo cáo doanh số: `POST https://pos.open.nhanh.vn/v3.0/product/list?appId=..&businessId=..`, header `Authorization: <accessToken>`, body JSON `{filters, paginator:{size:100, next}}`; danh mục `/v3.0/product/category`, nhãn hàng `/v3.0/product/brand`. Upsert `San_Pham` theo khóa chuẩn: mã (`code`), tên (`name`), ảnh (`images.avatar`, không có thì ảnh đầu `images.others`), giá niêm yết (`prices.retail`), Nhãn hàng (tên theo `brandId`), Danh mục (nhóm cha cao nhất theo `categoryId`), Dòng hàng (nhóm con; nếu thiếu suy từ tên). Mỗi lượt tối đa 5 trang (500 SP), phân trang bằng con trỏ `paginator.next` — admin gửi lại `next` đến khi `null`.
-- API v2.0 cũ (`https://open.nhanh.vn/api/product/search`) đã bỏ: trả trang HTML 404 → lỗi `Unexpected token '<'`.
-- Lỗi rõ ràng: Nhanh.vn hoặc Apps Script trả **HTML thay vì JSON** → log hiện nguồn (Nhanh.vn + đường dẫn / Apps Script + action), HTTP status, tiêu đề trang và 300 ký tự nội dung; Nhanh trả `code != 1` → log `errorCode` + `messages`; `ERR_429` → tự chờ `lockedSeconds` rồi gọi lại (tối đa 3 lần), giãn cách 250 ms / request.
-- Kiểm thử 18/11/2026 với dữ liệu thật: 1 lượt = 500 sản phẩm (đủ mã, tên, nhãn hàng, giá, danh mục); 500 SP đầu không có ảnh trên Nhanh, SP có ảnh (VD `P-AYPW051-4V`) trả đúng `images.avatar`.
+## 2. Đồng bộ sản phẩm từ 2 web Haravan (KHÔNG tải kho Nhanh.vn)
+Nút "Đồng bộ sản phẩm mới từ Web gốc" (có hộp xác nhận):
+1. **Lượt đầu XÓA SẠCH** sheet `San_Pham` (loại sản phẩm rác cũ từ Nhanh.vn), rồi quét 2 web: thử `/products.json?limit=250` trước, nếu lỗi/rỗng tự dùng `/collections/all/products.json?limit=250` (hiện `/products.json` trả 404 và Haravan giới hạn 50 SP/trang), tăng trang tới khi trang rỗng. Trang lỗi (mạng/HTTP≠200) **không làm sập**: thử lại 1 lần, rồi dừng web đó, vẫn lưu mọi SP đã lấy và báo cảnh báo; nghỉ 300ms giữa các trang. Mỗi lượt ≤ ~150 giây; admin gọi lặp theo con trỏ `{web, trang}`.
+2. **Loại**: `published_at == null` (ẩn), không có ảnh, không có SKU/barcode.
+3. **Mã NB (khóa)**: ưu tiên `barcode` của variant (đã là mã gốc sạch, vd `P-AKPW001-12V`); nếu trống lấy `sku` và bỏ hậu tố size của chính variant (`-39`, `-S`, ` A/S`…; chỉ bỏ khi đúng bằng size của variant nên không đụng mã màu `-4`). Sau đó `canon()` (bỏ `P-`, gộp đuôi `V`/`C`). Mọi variant cùng Mã NB → **1 card**, các size nằm trong `variants`. Cùng Mã NB xuất hiện ở cả 2 web → gộp, không nhân đôi.
+4. **Web Li-Ning "GỘP MÀU"** (1 product chứa nhiều màu = nhiều Mã NB): tách mỗi **Mã NB/màu** thành 1 card (tên = tên SP + " - " + màu, ảnh = ảnh của variant nếu có) để size/tồn không lẫn giữa các màu. Không bao giờ tách theo size.
+5. **Size**: lấy từ option "Kích thước/Size" của variant, chuẩn hóa như file tồn (quy tắc 2; `Chung` = FREESIZE). Sản phẩm chỉ có option Màu: lấy size từ đuôi SKU, không có = FREESIZE. Đuôi size trong SKU (vd UK 4.5 trong `...V4.5` khi option là EU 36) được lưu thêm làm size dự phòng để khớp file tồn.
+6. **Dữ liệu lấy từ Haravan**: tên (`title`), Nhãn hàng (`vendor`, web Li-Ning mặc định "Li-Ning"), giá niêm yết = max(`price`, `compare_at_price`), ảnh (ảnh của variant, không có thì `images[0].src`), link. **Danh mục / Dòng hàng**: phân loại theo từ khóa trên tên SP rồi `product_type` + `tags` (bảng `LINE_RULES` trong `Code.gs`); không khớp → Dòng hàng = `product_type`, Danh mục = "Khác".
+7. Không gọi Nhanh.vn nữa (đã gỡ code). Tra chéo danh mục theo SKU từ Nhanh.vn **chưa làm** — phân loại hiện lấy từ Haravan; nếu cần danh mục chuẩn Nhanh.vn sẽ làm sau, chỉ tra đúng các SKU đã lấy.
 
-## 3. Ẩn tồn, chỉ hiện size còn hàng
-Catalog công khai chỉ chứa `sizes[]` có `tồn > 0`. Sản phẩm không còn size nào, hoặc chưa có giá/chưa có trong `San_Pham`, bị ẩn. Khi đặt vượt tồn, server báo "không đủ hàng" không kèm số.
+## 3. Hiển thị trên trang khách & ẩn tồn
+Sản phẩm chỉ hiện khi thuộc `San_Pham` (đã từ 2 web) **và** có ≥1 size có tồn > 0 trong `Ton_Buon`. Khớp tồn theo từng variant: (Mã NB barcode/sku chuẩn hóa) × (size Haravan, rồi size đuôi SKU); mỗi cặp mã+size chỉ tính 1 lần. Catalog công khai chỉ chứa `sizes[]` còn hàng, **không số tồn**. Khi đặt vượt tồn server báo "không đủ hàng" không kèm số. Mã có tồn nhưng không thuộc sản phẩm nào trên 2 web sẽ không hiển thị (admin thấy số lượng mã này).
 
 ## 4. Chiết khấu
 Ưu tiên: **Dòng hàng > Danh mục > Nhãn hàng > Mặc định**. Giá sỉ = `round(giá niêm yết × (100 − %)/100)`. Tính lại ở server khi chốt đơn.
