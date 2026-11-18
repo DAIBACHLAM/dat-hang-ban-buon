@@ -258,7 +258,7 @@ $('#sync').onclick=async()=>{
   if(!confirm('XÓA SẠCH toàn bộ sản phẩm cũ và nạp lại từ mixsport.vn + liningvietnam.com.vn?'))return;
   const b=$('#sync');b.disabled=true;let next=null,n=0,lot=0;
   try{
-    do{lot++;log(`Đồng bộ lượt ${lot}${lot===1?' (đã xóa dữ liệu cũ)':''} — Haravan products.json...`);const r=await api('syncWeb',{next});n+=r.synced;next=r.next;log(`  +${r.synced} sản phẩm hợp lệ, bỏ ${r.skipped} (ẩn/không ảnh/không SKU) · ${r.pages} trang${next?' — còn tiếp':''}`)}while(next);
+    do{lot++;log(`Đồng bộ lượt ${lot}${lot===1?' (đã xóa dữ liệu cũ)':''} — Haravan products.json...`);const r=await api('syncWeb',{next});n+=r.synced;next=r.next;log(`  +${r.synced} thẻ, bỏ ${r.skipped} SP (ẩn/không ảnh/không SKU) · ${r.pages} trang · tổng ${r.total} thẻ${next?' — còn tiếp':''}`);(r.warnings||[]).forEach(w=>log('  ⚠ '+w,'warn'))}while(next);
     log(`✔ Xong, ${n} lượt sản phẩm nạp từ 2 web (mẫu trùng giữa 2 web đã gộp)`,'ok');await loadAdmin();
   }catch(e){log('✘ '+e.message,'err')}
   b.disabled=false;
