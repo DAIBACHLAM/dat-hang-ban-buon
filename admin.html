@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>Quản trị Bán Buôn</title>
+<style>
+:root{--bg:#f6f7f9;--bd:#e5e7eb;--mu:#6b7280;--ac:#d71920;--dk:#111827;--ok:#0a7d3c}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--dk);font:14px/1.45 -apple-system,"Segoe UI",Roboto,sans-serif}
+button,input,select{font:inherit}
+.wrap{max-width:1100px;margin:auto;padding:14px}
+h2{margin:0 0 10px;font-size:17px}
+.box{background:#fff;border:1px solid var(--bd);border-radius:12px;padding:16px;margin-bottom:16px}
+.tabs{display:flex;gap:8px;margin-bottom:14px}
+.tabs button{padding:9px 16px;border-radius:999px;border:1px solid var(--bd);background:#fff}
+.tabs button.on{background:var(--dk);color:#fff}
+.btn{background:var(--dk);color:#fff;border:0;border-radius:9px;padding:10px 16px;font-weight:600;cursor:pointer}
+.btn.red{background:var(--ac)}.btn.sec{background:#fff;color:var(--dk);border:1px solid var(--bd)}.btn:disabled{opacity:.5}
+#drop{border:2px dashed #b8bcc4;border-radius:12px;padding:30px;text-align:center;color:var(--mu);cursor:pointer}
+#drop.over{border-color:var(--ac);background:#fff5f5}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--bd);vertical-align:top}
+th{font-size:12px;color:var(--mu);text-transform:uppercase}
+input[type=text],input[type=password],input[type=number]{padding:7px 9px;border:1px solid var(--bd);border-radius:8px}
+input.pct{width:80px}
+.log{font:12.5px/1.5 ui-monospace,Menlo,monospace;background:var(--bg);border-radius:8px;padding:10px;max-height:220px;overflow:auto;white-space:pre-wrap;margin-top:10px}
+.warn{color:#b45309}.err{color:var(--ac)}.ok{color:var(--ok)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.sm{color:var(--mu);font-size:12.5px}
+.tag{display:inline-block;border-radius:6px;padding:1px 7px;font-size:12px;background:#eef0f3}
+.tag.bad{background:#fde8e8;color:var(--ac)}.tag.good{background:#e1f5e9;color:var(--ok)}
+#lock{max-width:320px;margin:20vh auto;text-align:center}
+.hide{display:none}
+</style>
+</head>
+<body>
+<div id="lock" class="box">
+  <h2>Quản trị — nhập PIN</h2>
+  <input type="password" id="pin" inputmode="numeric" placeholder="Mã PIN" style="width:100%;margin-bottom:10px">
+  <button class="btn" id="go" style="width:100%">Vào</button>
+  <div id="lockerr" class="err sm" style="margin-top:8px"></div>
+</div>
+
+<div id="app" class="wrap hide">
+  <div class="tabs"><button data-t="t1" class="on">Thả tồn & Chiết khấu</button><button data-t="t2">Đơn buôn</button><button id="out" style="margin-left:auto">Khóa</button></div>
+
+  <div id="t1">
+    <div class="box">
+      <h2>1. Kéo thả file tồn kho</h2>
+      <div id="drop">Kéo thả nhiều file (.xlsx .xlsb .xlsm .csv .txt .tsv) vào đây hoặc bấm để chọn</div>
+      <input type="file" id="files" multiple accept=".xlsx,.xlsb,.xlsm,.xls,.csv,.txt,.tsv" class="hide">
+      <div id="flist"></div>
+      <div class="row">
+        <button class="btn red" id="up" disabled>Đẩy tồn lên hệ thống</button>
+        <button class="btn sec" id="sync">Đồng bộ sản phẩm mới từ Web gốc</button>
+        <span class="sm" id="stat"></span>
+      </div>
+      <div class="log" id="log" style="display:none"></div>
+    </div>
+    <div class="box">
+      <h2>2. Chiết khấu (%)</h2>
+      <div class="sm">Ưu tiên: Dòng hàng &gt; Danh mục &gt; Nhãn hàng &gt; Mặc định. Để trống = không đặt riêng.</div>
+      <div class="row">Mặc định: <input class="pct" type="number" id="dDef" min="0" max="100" step="0.1"> %</div>
+      <div class="grid2" id="dGrid"></div>
+      <div class="row"><button class="btn" id="saveD">Lưu chiết khấu</button><span id="dmsg" class="sm"></span></div>
+    </div>
+  </div>
+
+  <div id="t2" class="hide">
+    <div class="box">
+      <h2>3. Đơn buôn</h2>
+      <div class="row" style="margin:0 0 10px"><button class="btn sec" id="reload">Tải lại</button><button class="btn" id="xls">Xuất Excel (lên đơn Nhanh.vn)</button><span class="sm">Cột "Tồn" chỉ hiển thị cho admin.</span></div>
+      <div id="ords"></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="config.js"></script>
+<script>
+(function(){
+'use strict';
+const $=s=>document.querySelector(s);
+const API=window.APP_CONFIG.API_URL;
+const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money=n=>Math.round(n).toLocaleString('vi-VN')+'đ';
+let PIN=sessionStorage.getItem('pin')||'';
+async function api(action,body){
+  const r=await fetch(API,{method:'POST',body:JSON.stringify(Object.assign({action,pin:PIN},body||{}))}).then(r=>r.json());
+  if(!r.ok)throw new Error(r.error||'Lỗi');return r;
+}
+function log(m,c){const l=$('#log');l.style.display='block';l.insertAdjacentHTML('beforeend',`<div class="${c||''}">${esc(m)}</div>`);l.scrollTop=l.scrollHeight}
+
+/* ---------- PIN ---------- */
+async function enter(){
+  PIN=$('#pin').value||PIN;
+  try{await api('auth');sessionStorage.setItem('pin',PIN);$('#lock').classList.add('hide');$('#app').classList.remove('hide');loadAdmin()}
+  catch(e){$('#lockerr').textContent=e.message;PIN=''}
+}
+$('#go').onclick=enter;$('#pin').onkeydown=e=>{if(e.key==='Enter')enter()};
+$('#out').onclick=()=>{sessionStorage.removeItem('pin');location.reload()};
+if(PIN)enter();
+document.querySelectorAll('.tabs [data-t]').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('.tabs [data-t]').forEach(x=>x.classList.toggle('on',x===b));
+  ['t1','t2'].forEach(t=>$('#'+t).classList.toggle('hide',t!==b.dataset.t));
+  if(b.dataset.t==='t2')loadOrders();
+});
+
+/* =====================================================================
+   5 QUY TẮC CHUẨN HÓA TỒN (xem BUSINESS_LOGIC.md)
+   ===================================================================== */
+const fold=s=>String(s==null?'':s).normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/đ/g,'d').toLowerCase().trim();
+// Quy tắc 3+4: gộp đuôi V/C, bỏ tiền tố P-  (PHẢI giống canon_ trong Code.gs)
+function canon(c){let s=String(c||'').toUpperCase().replace(/\s+/g,'');s=s.replace(/^P-/,'');s=s.replace(/([0-9])[VC]$/,'$1');return s}
+// Quy tắc 2: A/S -> S ; trống/NO -> FREESIZE
+function normSize(v){
+  let s=String(v==null?'':v).trim().toUpperCase().replace(/\s+/g,'');
+  if(!s||s==='NO'||s==='FREE'||s==='FREESIZE'||s==='F')return 'FREESIZE';
+  s=s.replace(/^A\//,'');
+  if(s==='XXL')s='2XL';
+  return s;
+}
+const SIZE_HDR=/^(A\/)?(\d{1,2}(\.5)?[+-]?|\d?X{0,2}S|XXS|XS|S|M|L|\d?XL|XXL|FREE\s?SIZE|F|NO)$/i;
+const BAD_HDR=/(gia|price|nam|year|total|tong|sum|ton\s*kho|amount|thanh\s*tien)/;
+const CODE_HDR=/(article|ma\s*nb|ma\s*hang|ma\s*sp|ma\s*san\s*pham|^ma$|^code$|sku|item|model|style)/;
+const SIZE_COL=/^(size|kich\s*co|sz|co)$/;
+const QTY_COL=/(^ton|\bton\b|qty|quantity|so\s*luong|^sl$|stock|on\s*hand)/;
+const isNum=v=>v!==''&&v!=null&&!isNaN(Number(String(v).replace(/,/g,'')));
+const toQty=v=>{const n=Number(String(v).replace(/,/g,''));return isNaN(n)?0:Math.max(0,Math.round(n))}; // tồn âm = 0
+
+// Quy tắc 1: sheet dọc trước, rồi pivot
+function parseSheetVertical(rows){
+  for(let r=0;r<Math.min(rows.length,40);r++){
+    const h=rows[r].map(fold);
+    const ci=h.findIndex(x=>CODE_HDR.test(x)&&!BAD_HDR.test(x));
+    const si=h.findIndex(x=>SIZE_COL.test(x));
+    const qi=h.findIndex(x=>QTY_COL.test(x)&&!/(gia|price|nam|year)/.test(x));
+    if(ci>=0&&si>=0&&qi>=0){
+      const out=[];
+      for(let i=r+1;i<rows.length;i++){
+        const row=rows[i],code=String(row[ci]||'').trim();
+        if(!code||/^(total|tong)/i.test(code))continue;
+        out.push([code,normSize(row[si]),toQty(row[qi])]);
+      }
+      return out;
+    }
+  }
+  return null;
+}
+function parseSheetPivot(rows){
+  for(let r=0;r<Math.min(rows.length,40);r++){
+    const raw=rows[r],h=raw.map(fold);
+    const sizeCols=[];
+    raw.forEach((v,i)=>{
+      const t=String(v==null?'':v).trim();
+      if(!t||BAD_HDR.test(h[i])||/^(19|20)\d\d$/.test(t))return; // bỏ cột giá/năm/total
+      if(SIZE_HDR.test(t.replace(/\s+/g,'')))sizeCols.push(i);
+    });
+    if(sizeCols.length<2)continue;
+    let ci=h.findIndex(x=>CODE_HDR.test(x)&&!BAD_HDR.test(x));
+    if(ci<0)ci=raw.findIndex((v,i)=>!sizeCols.includes(i)&&String(v||'').trim());
+    if(ci<0)ci=0;
+    const out=[];
+    for(let i=r+1;i<rows.length;i++){
+      const row=rows[i],code=String(row[ci]||'').trim();
+      if(!code||/^(total|tong)/i.test(code))continue;
+      sizeCols.forEach(c=>{const v=row[c];if(isNum(v)&&toQty(v)>0)out.push([code,normSize(raw[c]),toQty(v)])});
+    }
+    return out;
+  }
+  return null;
+}
+function parseWorkbook(wb){
+  const all=[],info=[];
+  wb.SheetNames.forEach(n=>{
+    const rows=XLSX.utils.sheet_to_json(wb.Sheets[n],{header:1,raw:true,defval:''});
+    let res=parseSheetVertical(rows),mode='dọc';
+    if(!res){res=parseSheetPivot(rows);mode='ngang'}
+    if(res&&res.length){all.push(...res);info.push(`${n}: ${res.length} dòng (${mode})`)}
+  });
+  return {rows:all,info};
+}
+// Quy tắc 5 (trong 1 file): cộng dồn Mã NB + Size
+function aggregate(rows){
+  const m=new Map();
+  rows.forEach(([c,s,q])=>{const k=canon(c)+'\u0001'+s;m.set(k,(m.get(k)||0)+q)});
+  return m;
+}
+// Kho: lấy từ tên file bỏ ngày/số/đuôi — cùng kho nhiều file => chỉ lấy file mới nhất (không cộng trùng)
+const guessWh=n=>fold(n.replace(/\.[^.]+$/,'')).replace(/\d+([-_./]\d+)*/g,'').replace(/[^a-z]+/g,' ').trim()||'kho';
+
+/* ---------- Kéo thả ---------- */
+const FILES=[]; // {name,mtime,wh,map,info,err}
+const drop=$('#drop');
+drop.onclick=()=>$('#files').click();
+drop.ondragover=e=>{e.preventDefault();drop.classList.add('over')};
+drop.ondragleave=()=>drop.classList.remove('over');
+drop.ondrop=e=>{e.preventDefault();drop.classList.remove('over');addFiles([...e.dataTransfer.files])};
+$('#files').onchange=e=>addFiles([...e.target.files]);
+async function addFiles(fs){
+  for(const f of fs){
+    const ent={name:f.name,mtime:f.lastModified,wh:guessWh(f.name)};
+    try{
+      const wb=XLSX.read(await f.arrayBuffer(),{type:'array'});
+      const p=parseWorkbook(wb);
+      if(!p.rows.length)throw new Error('Không nhận diện được dữ liệu tồn');
+      ent.map=aggregate(p.rows);ent.info=p.info;
+    }catch(err){ent.err=err.message}
+    FILES.push(ent);
+  }
+  renderFiles();
+}
+function merge(){
+  // nhóm theo kho -> mỗi kho chỉ giữ file mới nhất; các kho khác nhau thì cộng
+  const byWh={};
+  FILES.filter(f=>f.map).forEach(f=>{if(!byWh[f.wh]||f.mtime>byWh[f.wh].mtime)byWh[f.wh]=f});
+  const total=new Map();
+  Object.values(byWh).forEach(f=>f.map.forEach((q,k)=>total.set(k,(total.get(k)||0)+q)));
+  return {total,used:new Set(Object.values(byWh))};
+}
+function renderFiles(){
+  const {total,used}=merge();
+  $('#flist').innerHTML=`<table style="margin-top:12px"><tr><th>File</th><th>Kho (sửa nếu cần)</th><th>Kết quả</th><th></th></tr>`+
+  FILES.map((f,i)=>`<tr><td>${esc(f.name)}</td><td><input type="text" data-i="${i}" value="${esc(f.wh)}"></td>
+  <td>${f.err?`<span class="err">${esc(f.err)}</span>`:`${f.map.size} mã+size · ${used.has(f)?'<span class="tag good">Dùng</span>':'<span class="tag bad">Bỏ (trùng kho, cũ hơn)</span>'}<div class="sm">${esc(f.info.join(' | '))}</div>`}</td>
+  <td><button class="btn sec" data-del="${i}">×</button></td></tr>`).join('')+'</table>';
+  const codes=new Set([...total.keys()].map(k=>k.split('\u0001')[0]));
+  let pcs=0;total.forEach(q=>pcs+=q);
+  $('#stat').textContent=total.size?`${codes.size} mã · ${total.size} dòng size · ${pcs.toLocaleString('vi-VN')} sản phẩm`:'';
+  $('#up').disabled=!total.size;
+}
+$('#flist').onchange=e=>{if(e.target.dataset.i!=null){FILES[e.target.dataset.i].wh=e.target.value.trim()||'kho';renderFiles()}};
+$('#flist').onclick=e=>{const d=e.target.dataset.del;if(d!=null){FILES.splice(d,1);renderFiles()}};
+$('#up').onclick=async()=>{
+  const {total}=merge();
+  const rows=[...total].filter(([k,q])=>q>0).map(([k,q])=>{const [c,s]=k.split('\u0001');return [c,s,q]});
+  if(!confirm(`Thay toàn bộ tồn trên hệ thống bằng ${rows.length} dòng?`))return;
+  $('#up').disabled=true;log('Đang đẩy tồn...');
+  try{const r=await api('uploadStock',{rows});log(`✔ Đã lưu ${r.saved} dòng tồn`,'ok');await loadAdmin()}
+  catch(e){log('✘ '+e.message,'err')}
+  $('#up').disabled=false;
+};
+
+/* ---------- Đồng bộ web gốc ---------- */
+$('#sync').onclick=async()=>{
+  const b=$('#sync');b.disabled=true;let page=1,n=0;
+  try{
+    while(page){log(`Đồng bộ từ trang ${page}...`);const r=await api('syncWeb',{page});n+=r.synced;page=r.next;log(`  +${r.synced} sản phẩm (tổng ${r.totalPages} trang)`)}
+    log(`✔ Xong, ${n} sản phẩm cập nhật mã/ảnh/giá/phân loại`,'ok');await loadAdmin();
+  }catch(e){log('✘ '+e.message,'err')}
+  b.disabled=false;
+};
+
+/* ---------- Chiết khấu ---------- */
+let AD=null;
+async function loadAdmin(){
+  try{
+    AD=await api('adminData');
+    const val=(lv,nm)=>{const r=AD.discounts.find(d=>d.level===lv&&String(d.name)===nm);return r?r.pct:''};
+    const dv=AD.discounts.find(d=>d.level==='default');$('#dDef').value=dv?dv.pct:'';
+    const sec=(t,lv,arr)=>`<div><b>${t}</b><table>${arr.map(n=>`<tr><td>${esc(n)}</td><td><input class="pct" type="number" min="0" max="100" step="0.1" data-lv="${lv}" data-nm="${esc(n)}" value="${val(lv,n)}"> %</td></tr>`).join('')||'<tr><td class="sm">Chưa có dữ liệu — hãy đồng bộ web gốc</td></tr>'}</table></div>`;
+    $('#dGrid').innerHTML=sec('Nhãn hàng','brand',AD.brands)+sec('Danh mục','category',AD.categories)+sec('Dòng hàng','line',AD.lines);
+    const s=AD.stats;
+    $('#stat').insertAdjacentHTML('afterend','');
+    $('#dmsg').textContent=`Hệ thống: ${s.products} SP · ${s.stockCodes} mã có tồn · ${s.pieces} sp`+(s.unmatchedCount?` · ⚠ ${s.unmatchedCount} mã tồn chưa có thông tin web (bấm Đồng bộ)`:'');
+  }catch(e){log('✘ '+e.message,'err')}
+}
+$('#saveD').onclick=async()=>{
+  const rows=[];
+  if($('#dDef').value!=='')rows.push({level:'default',name:'*',pct:$('#dDef').value});
+  document.querySelectorAll('#dGrid input').forEach(i=>{if(i.value!=='')rows.push({level:i.dataset.lv,name:i.dataset.nm,pct:i.value})});
+  try{await api('saveDiscounts',{rows});$('#dmsg').textContent='✔ Đã lưu, áp dụng ngay lên trang khách'}catch(e){$('#dmsg').textContent='✘ '+e.message}
+};
+
+/* ---------- Đơn buôn ---------- */
+let ORDERS=[];
+async function loadOrders(){
+  $('#ords').textContent='Đang tải...';
+  try{ORDERS=(await api('orders')).orders;drawOrders()}catch(e){$('#ords').textContent=e.message}
+}
+$('#reload').onclick=loadOrders;
+function drawOrders(){
+  $('#ords').innerHTML=ORDERS.map(o=>{
+    const short=o.lines.filter(l=>l.ton<l.qty).length;
+    return `<details class="box" style="padding:10px"><summary><b>${esc(o.id)}</b> · ${esc(o.name)} · ${esc(o.phone)} · ${money(o.total)}
+    <span class="tag ${short?'bad':'good'}">${short?short+' dòng thiếu tồn':'Đủ tồn'}</span> <span class="tag">${esc(o.status)}</span>
+    <span class="sm">${esc(o.time)}</span></summary>
+    ${o.note?`<div class="sm">Ghi chú: ${esc(o.note)}</div>`:''}
+    <table><tr><th>Mã NB</th><th>Tên</th><th>Size</th><th>SL</th><th>Tồn</th><th>Đơn giá</th><th>Thành tiền</th></tr>
+    ${o.lines.map(l=>`<tr><td>${esc(l.ma)}</td><td>${esc(l.ten)}</td><td>${esc(l.size)}</td><td>${l.qty}</td><td class="${l.ton<l.qty?'err':''}">${l.ton}</td><td>${money(l.unit)}</td><td>${money(l.amount)}</td></tr>`).join('')}</table>
+    <div class="row">${['Mới','Đã xác nhận','Đã lên Nhanh','Hủy'].map(s=>`<button class="btn sec" data-st="${s}" data-id="${esc(o.id)}">${s}</button>`).join('')}</div></details>`;
+  }).join('')||'<div class="sm">Chưa có đơn</div>';
+}
+$('#ords').onclick=async e=>{
+  const st=e.target.dataset.st;if(!st)return;
+  try{await api('orderStatus',{id:e.target.dataset.id,status:st});loadOrders()}catch(err){alert(err.message)}
+};
+$('#xls').onclick=()=>{
+  const rows=[['Mã đơn','Thời gian','Khách','SĐT','Mã NB','Tên SP','Size','SL','Đơn giá (sau CK)','Thành tiền','Trạng thái']];
+  ORDERS.filter(o=>o.status!=='Hủy').forEach(o=>o.lines.forEach(l=>rows.push([o.id,o.time,o.name,o.phone,l.ma,l.ten,l.size,l.qty,l.unit,l.amount,o.status])));
+  const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(rows),'Don_Buon');
+  XLSX.writeFile(wb,'don-buon-'+new Date().toISOString().slice(0,10)+'.xlsx');
+};
+})();
+</script>
+</body>
+</html>
